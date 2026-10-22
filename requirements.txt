@@ -1,0 +1,7 @@
+# Python packages (install with: pip install -r requirements.txt)
+# The [default] extra includes yt-dlp-ejs, which yt-dlp needs for YouTube.
+yt-dlp[default]>=2025.11.12
+
+# Also required, but not installable with pip (see README.md):
+#   ffmpeg  - audio conversion, cover art and chapters
+#   deno    - JavaScript runtime yt-dlp uses to download from YouTube
