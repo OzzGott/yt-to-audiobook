@@ -75,8 +75,11 @@ The `.m4b` is saved in the current folder as `Channel - Title.m4b`. Put the link
 ### Examples
 
 ```bash
-# Several videos at once, saved to a specific folder
+# Several videos, saved to a specific folder (3 are processed at a time)
 python3 yt2audiobook.py URL1 URL2 URL3 -o ~/Audiobooks
+
+# Process 5 at a time instead
+python3 yt2audiobook.py URL1 URL2 URL3 URL4 URL5 -j 5
 
 # Cut out sponsor segments (uses SponsorBlock)
 python3 yt2audiobook.py URL --sponsorblock
@@ -93,6 +96,7 @@ python3 yt2audiobook.py URL --bitrate 48k
 | Option | What it does |
 |---|---|
 | `-o`, `--output FOLDER` | Where to save the files (default: current folder) |
+| `-j`, `--jobs N` | How many videos to process at the same time (default: 3). Use `-j 1` to go one by one with full progress output |
 | `--bitrate RATE` | Audio quality: `32k`, `48k`, `64k` (default), `96k`, or `original` to keep YouTube's audio unchanged |
 | `--stereo` | Keep stereo; useful when there's music worth hearing (default: mono) |
 | `--cover MODE` | `crop` to a square (default), `fit` with black bars, `original` 16:9, or `none` |
@@ -141,6 +145,7 @@ You may see warnings like `Application provided duration ... is invalid`. These 
 - **The download suddenly fails, or YouTube says "Sign in to confirm you're not a bot".** YouTube changes often, and yt-dlp releases fixes quickly. Update it with `brew upgrade yt-dlp` (macOS) or `pip install -U "yt-dlp[default]"` (Windows/Linux), then try again.
 - **A "JavaScript runtime" or "n challenge" warning.** Deno is missing or not on your PATH. Install it as shown above and open a new terminal.
 - **`yt-dlp not found on PATH` / `ffmpeg not found on PATH`.** Install the missing tool, or open a new terminal window so it's picked up.
+- **One video in a batch failed.** The others still finish. The failed links are listed at the end, so you can rerun just those. With several videos running at once, error details are shortened; rerun the failed one alone to see yt-dlp's full output.
 - **No chapters.** The video doesn't have any. YouTube chapters come from timestamps the uploader added.
 
 ## A note on use
