@@ -140,7 +140,19 @@ done
 
 You may see warnings like `Application provided duration ... is invalid`. These are harmless.
 
+## Fixing books that won't sync to an iPhone
+
+Files made with versions of this script before 26 October 2026 can have a last chapter that runs a fraction of a second past the end of the audio. Books on the Mac plays them fine, but Finder silently skips them when syncing, for example "copying 1 of 26" when you have 35 books. Fix them in place (the audio is copied, not re-encoded, so there's no quality loss):
+
+```bash
+python3 yt2audiobook.py --fix-chapters *.m4b
+```
+
+Files that are already fine are left untouched. Then remove the fixed books from Books on the Mac, add the files again, and sync.
+
 ## Troubleshooting
+
+- **Finder syncs fewer audiobooks than Books shows.** See [Fixing books that won't sync](#fixing-books-that-wont-sync-to-an-iphone).
 
 - **The download suddenly fails, or YouTube says "Sign in to confirm you're not a bot".** YouTube changes often, and yt-dlp releases fixes quickly. Update it with `brew upgrade yt-dlp` (macOS) or `pip install -U "yt-dlp[default]"` (Windows/Linux), then try again.
 - **A "JavaScript runtime" or "n challenge" warning.** Deno is missing or not on your PATH. Install it as shown above and open a new terminal.

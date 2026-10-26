@@ -114,6 +114,56 @@ def download(url, workdir, sponsorblock, quiet=False):
     return audio, thumb, info
 
 
+def probe_json(path, *args):
+    result = subprocess.run(["ffprobe", "-v", "error", *args, "-of", "json", path],
+                            capture_output=True, text=True, errors="replace")
+    if result.returncode != 0:
+        raise ConvertError(f"ffprobe could not read {path}")
+    return json.loads(result.stdout or "{}")
+
+
+def audio_duration(path):
+    streams = probe_json(path, "-select_streams", "a:0",
+                         "-show_entries", "stream=duration").get("streams") or []
+    try:
+        return float(streams[0]["duration"])
+    except (IndexError, KeyError, ValueError):
+        raise ConvertError(f"could not read the audio length of {path}")
+
+
+def read_chapters(path):
+    chapters = []
+    for ch in probe_json(path, "-show_chapters").get("chapters") or []:
+        chapters.append((float(ch["start_time"]), float(ch["end_time"]),
+                         (ch.get("tags") or {}).get("title", "")))
+    return chapters
+
+
+def _ffmeta_escape(text):
+    return re.sub(r"([=;#\\\n])", r"\\\1", text)
+
+
+def write_chapter_file(chapters, max_end, path):
+    """Write chapters as an ffmetadata file, trimmed so none runs past max_end.
+
+    YouTube chapter times are whole seconds, and the audio can be a fraction of
+    a second shorter than the video. A chapter that runs past the end of the
+    audio makes iPhone syncing silently skip the whole book."""
+    limit_ms = int(max_end * 1000) - 50          # small safety margin
+    lines = [";FFMETADATA1"]
+    count = 0
+    for start, end, title in chapters:
+        s, e = int(start * 1000), min(int(end * 1000), limit_ms)
+        if e - s < 1000:                         # drop empty/negligible chapters
+            continue
+        lines += ["[CHAPTER]", "TIMEBASE=1/1000", f"START={s}", f"END={e}",
+                  f"title={_ffmeta_escape(title)}"]
+        count += 1
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return count
+
+
 def make_cover(thumb, out_path, mode, quiet=False):
     """Prepare the cover: 'crop' to centre square, 'fit' (pad to square), or 'original'."""
     filters = {
@@ -126,11 +176,16 @@ def make_cover(thumb, out_path, mode, quiet=False):
     return out_path
 
 
-def assemble(audio, cover, out_path, meta, bitrate="64k", stereo=False, quiet=False):
+def assemble(audio, cover, out_path, meta, bitrate="64k", stereo=False, quiet=False,
+             chapter_file=None):
     """Mux audio + cover + chapters + metadata into an .m4b."""
     cmd = ["ffmpeg", "-loglevel", "error", "-y", "-i", audio]
     if cover:
         cmd += ["-i", cover]
+    chapter_input = None
+    if chapter_file:
+        chapter_input = 2 if cover else 1
+        cmd += ["-i", chapter_file]
     cmd += ["-map", "0:a"]
     if cover:
         cmd += ["-map", "1:v", "-disposition:v:0", "attached_pic"]
@@ -142,7 +197,8 @@ def assemble(audio, cover, out_path, meta, bitrate="64k", stereo=False, quiet=Fa
     cmd += [
         "-map_metadata:g", "-1",  # drop yt-dlp's global tags, we write our own
         "-map_metadata:s", "-1",
-        "-map_chapters", "0",     # keep the chapters (with their titles)
+        # chapters from the trimmed chapter file, or none at all
+        "-map_chapters", str(chapter_input) if chapter_input is not None else "-1",
         "-f", "ipod",             # the .m4b flavour of MP4
     ]
     for key, value in meta.items():
@@ -184,18 +240,55 @@ def convert(url, args, tag="", quiet=False):
 
         os.makedirs(args.output, exist_ok=True)
         out_path = os.path.join(args.output, safe_filename(f"{author} - {title}") + ".m4b")
-        log(f"{tag}Building {os.path.basename(out_path)}")
-        assemble(audio, cover, out_path, meta, args.bitrate, args.stereo, quiet)
+        chapter_file = os.path.join(workdir, "chapters.txt")
+        n_chapters = write_chapter_file(read_chapters(audio), audio_duration(audio), chapter_file)
 
-        n_chapters = len(info.get("chapters") or [])
+        log(f"{tag}Building {os.path.basename(out_path)}")
+        assemble(audio, cover, out_path, meta, args.bitrate, args.stereo, quiet,
+                 chapter_file if n_chapters else None)
+
         log(f"{tag}Done: {out_path}"
             + (f"  ({n_chapters} chapters)" if n_chapters else "  (no chapters on this video)"))
         return out_path
 
 
+def fix_chapters(path):
+    """Trim chapters that run past the end of the audio in an existing .m4b,
+    replacing the file. Copies the audio as is (no quality loss).
+    Returns True if the file was changed."""
+    duration = audio_duration(path)
+    chapters = read_chapters(path)
+    if not chapters or max(end for _, end, _ in chapters) <= duration:
+        log(f"OK (no change needed): {path}")
+        return False
+
+    has_cover = bool(probe_json(path, "-select_streams", "v",
+                                "-show_entries", "stream=index").get("streams"))
+    with tempfile.TemporaryDirectory(prefix="yt2ab-fix-") as workdir:
+        chapter_file = os.path.join(workdir, "chapters.txt")
+        n = write_chapter_file(chapters, duration, chapter_file)
+        tmp = os.path.join(workdir, "fixed.m4b")
+        cmd = ["ffmpeg", "-loglevel", "error", "-y", "-i", path, "-i", chapter_file,
+               "-map", "0:a"]
+        if has_cover:
+            cmd += ["-map", "0:v", "-disposition:v:0", "attached_pic"]
+        cmd += ["-c", "copy", "-map_metadata", "0",
+                "-map_chapters", "1" if n else "-1", "-f", "ipod", tmp]
+        run(cmd, quiet=True)
+        shutil.move(tmp, path)
+    log(f"Fixed: {path}")
+    return True
+
+
 def main():
-    p = argparse.ArgumentParser(description="Turn YouTube videos into .m4b audiobooks.")
-    p.add_argument("urls", nargs="+", help="one or more YouTube video URLs")
+    p = argparse.ArgumentParser(
+        description="Turn YouTube videos into .m4b audiobooks.",
+        epilog="To repair existing .m4b files whose chapters run past the end of the "
+               "audio (they won't sync to an iPhone): yt2audiobook.py --fix-chapters *.m4b")
+    p.add_argument("urls", nargs="+", metavar="URL",
+                   help="one or more YouTube video URLs (or .m4b files with --fix-chapters)")
+    p.add_argument("--fix-chapters", action="store_true",
+                   help="repair existing .m4b files given instead of URLs, in place")
     p.add_argument("-o", "--output", default=".", help="output folder (default: current folder)")
     p.add_argument("-j", "--jobs", type=int, default=3,
                    help="how many videos to process at the same time (default: 3)")
@@ -212,7 +305,21 @@ def main():
     p.add_argument("--title", help="override the title (default: video title)")
     args = p.parse_args()
 
-    for tool in ("yt-dlp", "ffmpeg"):
+    if args.fix_chapters:
+        for tool in ("ffmpeg", "ffprobe"):
+            if not shutil.which(tool):
+                die(f"{tool} not found on PATH")
+        fixed = errors = 0
+        for path in args.urls:
+            try:
+                fixed += fix_chapters(path)
+            except ConvertError as e:
+                log(f"FAILED: {path}\n      {e}")
+                errors += 1
+        log(f"\n{fixed} fixed, {len(args.urls) - fixed - errors} already fine, {errors} failed.")
+        sys.exit(1 if errors else 0)
+
+    for tool in ("yt-dlp", "ffmpeg", "ffprobe"):
         if not shutil.which(tool):
             die(f"{tool} not found on PATH")
     if (args.author or args.title) and len(args.urls) > 1:
